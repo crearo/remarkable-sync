@@ -1,0 +1,8 @@
+# Downloaded files
+downloads/
+
+# Sync manifest
+.sync_manifest.json
+
+# Go build artifacts
+remarkable-sync
