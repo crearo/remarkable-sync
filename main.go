@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 const (
@@ -56,16 +60,59 @@ func main() {
 	fmt.Printf("%s%sreMarkable Sync Utility%s\n", colorBold, colorCyan, colorReset)
 	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n", colorDim, colorReset)
 
-	if len(os.Args) > 1 && os.Args[1] == "list" {
+	if len(os.Args) > 1 {
+		arg := os.Args[1]
+
+		if arg == "list" {
+			fmt.Printf("%s📡 Fetching documents list...%s\n\n", colorBlue, colorReset)
+			documents, err := fetchDocuments()
+			if err != nil {
+				fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
+				os.Exit(1)
+			}
+			for _, doc := range documents {
+				fmt.Printf("%s%s%s\n", colorBold, doc.VissibleName, colorReset)
+				fmt.Printf("  %s%s%s\n\n", colorDim, doc.ID, colorReset)
+			}
+			return
+		}
+
+		// Treat arg as notebook name
+		lastPageOnly := len(os.Args) > 2 && os.Args[2] == "last"
+
 		fmt.Printf("%s📡 Fetching documents list...%s\n\n", colorBlue, colorReset)
 		documents, err := fetchDocuments()
 		if err != nil {
 			fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
 			os.Exit(1)
 		}
-		for _, doc := range documents {
-			fmt.Printf("%s%s%s\n", colorBold, doc.VissibleName, colorReset)
-			fmt.Printf("  %s%s%s\n\n", colorDim, doc.ID, colorReset)
+
+		var found *Document
+		for i, doc := range documents {
+			if strings.EqualFold(doc.VissibleName, arg) {
+				found = &documents[i]
+				break
+			}
+		}
+		if found == nil {
+			fmt.Printf("%s✗ No notebook found with name: %s%s\n", colorRed, arg, colorReset)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s%s%s\n", colorBold, found.VissibleName, colorReset)
+
+		if err := ensureDirectories(); err != nil {
+			fmt.Printf("%s✗ Failed to create directories: %v%s\n", colorRed, err, colorReset)
+			os.Exit(1)
+		}
+
+		if lastPageOnly {
+			if err := downloadLastPage(found.ID, found.VissibleName); err != nil {
+				fmt.Printf("%s✗ Failed to download last page: %v%s\n", colorRed, err, colorReset)
+				os.Exit(1)
+			}
+		} else {
+			downloadFile(found.ID, found.VissibleName, "pdf")
 		}
 		return
 	}
@@ -281,6 +328,42 @@ func checkConnectivity() bool {
 	defer resp.Body.Close()
 
 	return resp.StatusCode == http.StatusOK
+}
+
+func downloadLastPage(id, name string) error {
+	url := fmt.Sprintf("%s/download/%s/pdf", remarkableBaseURL, id)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	pdfBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	// Get page count
+	pageCount, err := api.PageCount(bytes.NewReader(pdfBytes), model.NewDefaultConfiguration())
+	if err != nil {
+		return fmt.Errorf("reading pdf: %w", err)
+	}
+
+	// Extract last page — output written to downloads/pdf/{safeName}_page_{pageCount}.pdf
+	safeName := sanitizeFilename(name)
+	outDir := filepath.Join("downloads", "pdf")
+	pageRange := fmt.Sprintf("%d", pageCount)
+	if err := api.ExtractPages(bytes.NewReader(pdfBytes), outDir, safeName, []string{pageRange}, model.NewDefaultConfiguration()); err != nil {
+		return fmt.Errorf("extracting last page: %w", err)
+	}
+
+	filename := filepath.Join(outDir, fmt.Sprintf("%s_page_%d.pdf", safeName, pageCount))
+	fmt.Printf("  %s✓ Downloaded last page (page %d) → %s%s\n", colorGreen, pageCount, filename, colorReset)
+	return nil
 }
 
 func sanitizeFilename(name string) string {
