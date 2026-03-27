@@ -13,8 +13,20 @@ go build -o remarkable-sync main.go
 ## Run
 
 ```bash
+# Sync all notebooks
 ./remarkable-sync
+
+# List available notebooks
+./remarkable-sync list
+
+# Download a specific notebook (full PDF)
+./remarkable-sync "My Notebook"
+
+# Download just the last page of a notebook
+./remarkable-sync "My Notebook" last
 ```
+
+The last-page file is saved to `downloads/pdf/{name}_page_{N}.pdf`.
 
 ## How It Works
 
