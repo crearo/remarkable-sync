@@ -56,6 +56,20 @@ func main() {
 	fmt.Printf("%s%sreMarkable Sync Utility%s\n", colorBold, colorCyan, colorReset)
 	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n", colorDim, colorReset)
 
+	if len(os.Args) > 1 && os.Args[1] == "list" {
+		fmt.Printf("%s📡 Fetching documents list...%s\n\n", colorBlue, colorReset)
+		documents, err := fetchDocuments()
+		if err != nil {
+			fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
+			os.Exit(1)
+		}
+		for _, doc := range documents {
+			fmt.Printf("%s%s%s\n", colorBold, doc.VissibleName, colorReset)
+			fmt.Printf("  %s%s%s\n\n", colorDim, doc.ID, colorReset)
+		}
+		return
+	}
+
 	// Ensure directories exist
 	if err := ensureDirectories(); err != nil {
 		fmt.Printf("%s✗ Failed to create directories: %v%s\n", colorRed, err, colorReset)
