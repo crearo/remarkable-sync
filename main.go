@@ -20,7 +20,15 @@ const (
 	manifestFile      = ".sync_manifest.json"
 	maxRetries        = 3
 	retryDelay        = 1 * time.Second
+	notebookFileType  = "notebook"
+	allFlag           = "--all"
 )
+
+// RMDOC first: it is a quick copy of the raw files, while PDF export renders on the tablet.
+var syncFormats = []string{"rmdoc", "pdf"}
+
+// The tablet renders PDFs before responding, so the timeout covers render plus transfer.
+var httpClient = &http.Client{Timeout: 10 * time.Minute}
 
 // Color codes for terminal output
 const (
@@ -46,26 +54,53 @@ type Document struct {
 }
 
 type ManifestEntry struct {
-	LastSync string `json:"last_sync"`
+	// LastSync is the legacy single timestamp; loadManifest migrates it into PDF and RMDoc.
+	LastSync string `json:"last_sync,omitempty"`
+	PDF      string `json:"pdf,omitempty"`
+	RMDoc    string `json:"rmdoc,omitempty"`
+}
+
+func (e ManifestEntry) synced(format string) string {
+	if format == "pdf" {
+		return e.PDF
+	}
+	return e.RMDoc
+}
+
+func (e *ManifestEntry) markSynced(format, modifiedClient string) {
+	if format == "pdf" {
+		e.PDF = modifiedClient
+	} else {
+		e.RMDoc = modifiedClient
+	}
 }
 
 type SyncStats struct {
 	Downloaded int
 	Skipped    int
 	Failed     int
-	Partial    int
 }
 
 func main() {
 	fmt.Printf("%s%sreMarkable Sync Utility%s\n", colorBold, colorCyan, colorReset)
 	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n", colorDim, colorReset)
 
-	if len(os.Args) > 1 {
-		arg := os.Args[1]
+	var args []string
+	includeAll := false
+	for _, a := range os.Args[1:] {
+		if a == allFlag {
+			includeAll = true
+		} else {
+			args = append(args, a)
+		}
+	}
+
+	if len(args) > 0 {
+		arg := args[0]
 
 		if arg == "list" {
 			fmt.Printf("%s📡 Fetching documents list...%s\n\n", colorBlue, colorReset)
-			documents, err := fetchDocuments()
+			documents, err := fetchDocuments(includeAll)
 			if err != nil {
 				fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
 				os.Exit(1)
@@ -78,10 +113,10 @@ func main() {
 		}
 
 		// Treat arg as notebook name
-		lastPageOnly := len(os.Args) > 2 && os.Args[2] == "last"
+		lastPageOnly := len(args) > 1 && args[1] == "last"
 
 		fmt.Printf("%s📡 Fetching documents list...%s\n\n", colorBlue, colorReset)
-		documents, err := fetchDocuments()
+		documents, err := fetchDocuments(includeAll)
 		if err != nil {
 			fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
 			os.Exit(1)
@@ -132,67 +167,69 @@ func main() {
 
 	// Fetch documents list
 	fmt.Printf("%s📡 Fetching documents list...%s\n", colorBlue, colorReset)
-	documents, err := fetchDocuments()
+	documents, err := fetchDocuments(includeAll)
 	if err != nil {
 		fmt.Printf("%s✗ Failed to fetch documents: %v%s\n", colorRed, err, colorReset)
 		fmt.Printf("%s💡 Make sure your reMarkable tablet is connected and accessible at %s%s\n", colorYellow, remarkableBaseURL, colorReset)
 		os.Exit(1)
 	}
 
-	fmt.Printf("%s✓%s Found %d documents\n\n", colorGreen, colorReset, len(documents))
-
-	stats := SyncStats{}
-
-	// Process each document
-	for _, doc := range documents {
-		fmt.Printf("%s%s%s\n", colorBold, doc.VissibleName, colorReset)
-		fmt.Printf("  ID: %s%s%s\n", colorDim, doc.ID, colorReset)
-
-		// Check if we need to download
-		if !needsDownload(manifest, doc.ID, doc.ModifiedClient) {
-			fmt.Printf("  %s⊘ Skipped (up to date)%s\n\n", colorYellow, colorReset)
-			stats.Skipped++
-			continue
-		}
-
-		// Download PDF
-		pdfSuccess := downloadFile(doc.ID, doc.VissibleName, "pdf")
-
-		// Download RMDOC
-		rmdocSuccess := downloadFile(doc.ID, doc.VissibleName, "rmdoc")
-
-		// Update stats and manifest
-		if pdfSuccess && rmdocSuccess {
-			stats.Downloaded++
-			manifest[doc.ID] = ManifestEntry{LastSync: doc.ModifiedClient}
-		} else if pdfSuccess || rmdocSuccess {
-			stats.Partial++
-			manifest[doc.ID] = ManifestEntry{LastSync: doc.ModifiedClient}
-		} else {
-			stats.Failed++
-		}
-
-		fmt.Println()
+	kind := "notebooks"
+	if includeAll {
+		kind = "documents"
 	}
+	fmt.Printf("%s✓%s Found %d %s\n\n", colorGreen, colorReset, len(documents), kind)
 
-	// Save manifest
-	if err := saveManifest(manifest); err != nil {
-		fmt.Printf("%s✗ Failed to save manifest: %v%s\n", colorRed, err, colorReset)
-		os.Exit(1)
+	stats := make(map[string]SyncStats)
+	for _, format := range syncFormats {
+		fmt.Printf("%s%s%s pass%s\n\n", colorBold, colorCyan, strings.ToUpper(format), colorReset)
+		stats[format] = syncFormat(manifest, documents, format)
 	}
 
 	// Print summary
 	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorDim, colorReset)
 	fmt.Printf("%s%sSummary%s\n", colorBold, colorCyan, colorReset)
-	fmt.Printf("  %s✓ Downloaded:%s     %d documents (both formats)\n", colorGreen, colorReset, stats.Downloaded)
-	if stats.Partial > 0 {
-		fmt.Printf("  %s⚠ Partial:%s        %d documents (one format failed)\n", colorYellow, colorReset, stats.Partial)
-	}
-	fmt.Printf("  %s⊘ Skipped:%s        %d documents (up to date)\n", colorYellow, colorReset, stats.Skipped)
-	if stats.Failed > 0 {
-		fmt.Printf("  %s✗ Failed:%s         %d documents (both formats failed)\n", colorRed, colorReset, stats.Failed)
+	for _, format := range syncFormats {
+		st := stats[format]
+		fmt.Printf("  %s%s%s\n", colorBold, strings.ToUpper(format), colorReset)
+		fmt.Printf("    %s✓ Downloaded:%s   %d\n", colorGreen, colorReset, st.Downloaded)
+		fmt.Printf("    %s⊘ Skipped:%s      %d (up to date)\n", colorYellow, colorReset, st.Skipped)
+		if st.Failed > 0 {
+			fmt.Printf("    %s✗ Failed:%s       %d\n", colorRed, colorReset, st.Failed)
+		}
 	}
 	fmt.Printf("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", colorDim, colorReset)
+}
+
+func syncFormat(manifest map[string]ManifestEntry, documents []Document, format string) SyncStats {
+	stats := SyncStats{}
+	for _, doc := range documents {
+		entry := manifest[doc.ID]
+		// The tablet trims trailing zeros from fractional seconds, so ordering by string is unreliable.
+		if entry.synced(format) == doc.ModifiedClient {
+			stats.Skipped++
+			continue
+		}
+
+		fmt.Printf("%s%s%s\n", colorBold, doc.VissibleName, colorReset)
+		fmt.Printf("  ID: %s%s%s\n", colorDim, doc.ID, colorReset)
+		if !downloadFile(doc.ID, doc.VissibleName, format) {
+			stats.Failed++
+			fmt.Println()
+			continue
+		}
+
+		stats.Downloaded++
+		entry.markSynced(format, doc.ModifiedClient)
+		manifest[doc.ID] = entry
+		// Saved per document because a lost connection exits mid-sync.
+		if err := saveManifest(manifest); err != nil {
+			fmt.Printf("%s✗ Failed to save manifest: %v%s\n", colorRed, err, colorReset)
+			os.Exit(1)
+		}
+		fmt.Println()
+	}
+	return stats
 }
 
 func ensureDirectories() error {
@@ -220,6 +257,11 @@ func loadManifest() (map[string]ManifestEntry, error) {
 		return nil, err
 	}
 
+	for id, entry := range manifest {
+		if entry.LastSync != "" {
+			manifest[id] = ManifestEntry{PDF: entry.LastSync, RMDoc: entry.LastSync}
+		}
+	}
 	return manifest, nil
 }
 
@@ -229,21 +271,15 @@ func saveManifest(manifest map[string]ManifestEntry) error {
 		return err
 	}
 
-	return os.WriteFile(manifestFile, data, 0644)
-}
-
-func needsDownload(manifest map[string]ManifestEntry, id, modifiedClient string) bool {
-	entry, exists := manifest[id]
-	if !exists {
-		return true
+	tmp := manifestFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
 	}
-
-	// Simple string comparison works for ISO 8601 timestamps
-	return modifiedClient > entry.LastSync
+	return os.Rename(tmp, manifestFile)
 }
 
-func fetchDocuments() ([]Document, error) {
-	resp, err := http.Get(remarkableBaseURL + "/documents/")
+func fetchDocuments(includeAll bool) ([]Document, error) {
+	resp, err := httpClient.Get(remarkableBaseURL + "/documents/")
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +294,16 @@ func fetchDocuments() ([]Document, error) {
 		return nil, err
 	}
 
-	return documents, nil
+	if includeAll {
+		return documents, nil
+	}
+	notebooks := documents[:0]
+	for _, doc := range documents {
+		if doc.FileType == notebookFileType {
+			notebooks = append(notebooks, doc)
+		}
+	}
+	return notebooks, nil
 }
 
 func downloadFile(id, name, format string) bool {
@@ -292,7 +337,7 @@ func downloadFile(id, name, format string) bool {
 func downloadFileOnce(id, name, format string) bool {
 	url := fmt.Sprintf("%s/download/%s/%s", remarkableBaseURL, id, format)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return false
 	}
@@ -306,14 +351,19 @@ func downloadFileOnce(id, name, format string) bool {
 	safeName := sanitizeFilename(name)
 	filename := filepath.Join("downloads", format, fmt.Sprintf("%s-%s.%s", safeName, id, format))
 
-	file, err := os.Create(filename)
+	partial := filename + ".part"
+	file, err := os.Create(partial)
 	if err != nil {
 		return false
 	}
-	defer file.Close()
 
-	_, err = io.Copy(file, resp.Body)
-	return err == nil
+	_, copyErr := io.Copy(file, resp.Body)
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
+		os.Remove(partial)
+		return false
+	}
+	return os.Rename(partial, filename) == nil
 }
 
 func checkConnectivity() bool {
@@ -332,7 +382,7 @@ func checkConnectivity() bool {
 
 func downloadLastPage(id, name string) error {
 	url := fmt.Sprintf("%s/download/%s/pdf", remarkableBaseURL, id)
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return err
 	}

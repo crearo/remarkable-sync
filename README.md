@@ -1,6 +1,6 @@
 # reMarkable Sync
 
-Sync files from your reMarkable tablet to your computer. Downloads both PDF and RMDOC formats, tracking changes to avoid re-downloading unchanged files.
+Sync handwritten notebooks from your reMarkable tablet to your computer. Imported PDFs and EPUBs are skipped unless you pass `--all`. Downloads both PDF and RMDOC formats, tracking changes to avoid re-downloading unchanged files.
 
 ![Screenshot](screenshot.png)
 
@@ -15,6 +15,9 @@ go build -o remarkable-sync main.go
 ```bash
 # Sync all notebooks
 ./remarkable-sync
+
+# Sync every document, including imported PDFs and EPUBs
+./remarkable-sync --all
 
 # List available notebooks
 ./remarkable-sync list
@@ -32,7 +35,9 @@ The last-page file is saved to `downloads/pdf/{name}_page_{N}.pdf`.
 
 - Fetches document list from `http://10.11.99.1/documents/`
 - Compares timestamps with local manifest (`.sync_manifest.json`)
-- Downloads only new or modified documents
+- Runs two passes: every RMDOC first (a quick copy of the raw files), then every PDF (rendered on the tablet, slow)
+- Downloads only documents that are new or modified since that format last synced
+- Saves the manifest after each download, so an interrupted sync keeps its progress
 - Saves files to `downloads/pdf/` and `downloads/rmdoc/`
 - Retries failed downloads (3 attempts)
 - Exits early if tablet becomes unreachable
